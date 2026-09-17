@@ -89,6 +89,21 @@ def test_pitfall_checker_flags_mpc_misconfiguration():
     }
 
 
+def test_pitfall_checker_reads_defense_params_declared_per_run():
+    """A matrix config declares its arms inside `runs:`, and those params must be checked."""
+    cfg = _secagg_cfg(defenses=[], runs=[
+        {"framework": "reference", "name": "ok",
+         "defenses": [{"name": "mpc_aggregation", "params": {"quant_bits": 16}}]},
+        {"framework": "reference", "name": "broken",
+         "defenses": [{"name": "mpc_aggregation", "params": {"quant_bits": 4, "modulus": 16}}]},
+    ])
+    titles = {f.title for f in check_config(cfg) if f.pitfall == "P4_misconfig_secagg"}
+    assert titles == {
+        "Fixed-point precision likely too low",
+        "MPC ring too small for its precision",
+    }
+
+
 def test_pitfall_checker_flags_secagg_without_equality_oracle():
     cfg = _secagg_cfg(defenses=[{"name": "secure_aggregation"}], testing={"metamorphic": []})
     assert "P4_untested_secagg" in {f.pitfall for f in check_config(cfg)}

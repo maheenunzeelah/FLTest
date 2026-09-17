@@ -94,6 +94,7 @@ fltest run examples/configs/membership_inference.yaml
 fltest run examples/configs/dlg.yaml               # gradient inversion
 fltest run examples/configs/model_replacement.yaml # boosted backdoor, reference + Flower
 fltest run examples/configs/secure_agg.yaml        # DLG vs no defense / DP noise / masking
+fltest run examples/configs/mpc_aggregation.yaml   # what the finite ring costs: quantization, overflow, dropouts
 
 # detection: name the attackers instead of out-voting them
 fltest run examples/configs/fldetector.yaml

@@ -54,6 +54,15 @@ def check_config(config: TestConfig) -> List[Finding]:
         defense_names |= {d["name"] for d in run.get("defenses", []) if isinstance(d, dict) and "name" in d}
         metrics |= set(run.get("metrics", []))
 
+    # Defense parameters, from both sources. The name sets above answer "is this defense
+    # present"; the P4 misconfiguration detectors need the params that came with each
+    # occurrence, and a matrix config commonly declares those only inside `runs:`.
+    defense_specs = [(d.name, d.params) for d in config.defenses]
+    for run in config.runs:
+        for d in run.get("defenses", []):
+            if isinstance(d, dict) and "name" in d:
+                defense_specs.append((d["name"], d.get("params") or {}))
+
     # P1 — Inadequate testing against relevant threat models.
     if not attack_names:
         findings.append(Finding(
@@ -100,9 +109,9 @@ def check_config(config: TestConfig) -> List[Finding]:
             {"metrics": sorted(metrics)}))
 
     # P4 — Misconfiguration of privacy-preserving techniques.
-    for d in config.defenses:
-        if d.name == "gradient_noise":
-            sigma = d.params.get("sigma", 0.01)
+    for name, params in defense_specs:
+        if name == "gradient_noise":
+            sigma = params.get("sigma", 0.01)
             if sigma == 0:
                 findings.append(Finding(
                     "P4_misconfig_dp", "DP noise disabled", "high",
@@ -119,9 +128,9 @@ def check_config(config: TestConfig) -> List[Finding]:
     # P4 (continued) — misconfiguration of the secure-aggregation techniques. Their failure
     # modes are silent: a run with masking effectively disabled, or with a ring too small for
     # the values it carries, still produces a finite, plausible-looking aggregate.
-    for d in config.defenses:
-        if d.name == "secure_aggregation":
-            mask_scale = d.params.get("mask_scale", 1.0)
+    for name, params in defense_specs:
+        if name == "secure_aggregation":
+            mask_scale = params.get("mask_scale", 1.0)
             if mask_scale <= 0:
                 findings.append(Finding(
                     "P4_misconfig_secagg", "Secure aggregation masks disabled", "high",
@@ -130,10 +139,10 @@ def check_config(config: TestConfig) -> List[Finding]:
                     "Set a positive mask_scale, and read secagg_mask_to_update_ratio from the "
                     "run to confirm the mask actually dominates the update.",
                     {"mask_scale": mask_scale}))
-        if d.name == "mpc_aggregation":
-            quant_bits = d.params.get("quant_bits", 16)
-            modulus = d.params.get("modulus", 1 << 32)
-            dropout_rate = d.params.get("dropout_rate", 0.0)
+        if name == "mpc_aggregation":
+            quant_bits = params.get("quant_bits", 16)
+            modulus = params.get("modulus", 1 << 32)
+            dropout_rate = params.get("dropout_rate", 0.0)
             if dropout_rate > 0:
                 findings.append(Finding(
                     "P4_misconfig_secagg", "MPC dropouts without recovery", "high",
