@@ -128,6 +128,11 @@ _METRIC_HEADERS = {
     "mpc_dropouts": "mpc-drops",
     "mpc_max_encoded_bits": "mpc-bits",
     "fldetector_detected_count": "fld-flagged",
+    "detection_precision": "det-prec",
+    "detection_recall": "det-recall",
+    "detection_f1": "det-f1",
+    "detection_false_positives": "det-fp",
+    "detection_missed": "det-miss",
 }
 
 #: What each shortened column means, printed under the table for the metrics in play. A
@@ -155,6 +160,11 @@ _METRIC_GLOSS = {
     "mpc_dropouts": "clients removed after masking, whose pairwise masks stay in the sum",
     "mpc_max_encoded_bits": "log2 of the largest encoded magnitude; above 53 the float64 encode starts dropping low-order bits",
     "fldetector_detected_count": "clients FLDetector flagged as malicious and excluded this round",
+    "detection_precision": "share of flagged clients that the config actually made malicious",
+    "detection_recall": "share of the config's malicious clients that the defense flagged",
+    "detection_f1": "harmonic mean of detection precision and recall",
+    "detection_false_positives": "honest clients the defense wrongly flagged",
+    "detection_missed": "malicious clients the defense never flagged",
 }
 
 #: Width the fixed-settings block wraps at, independent of how wide the table is.

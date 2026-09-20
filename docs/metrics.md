@@ -62,6 +62,36 @@ since a residue moves the model without necessarily moving accuracy.
 `fldetector_detected_count` as a column when it is present. The other two are a list and a
 mapping, so they stay in the JSON report rather than becoming fixed-width cells.
 
+#### Was the detection correct?
+
+The metrics above say what a detector flagged, not whether it was right. Accuracy does not
+settle it either, because a detector that flagged one honest client alongside the attackers
+would produce nearly the same recovery curve. Add the `detection` listener to `metrics:` and
+the comparison is measured.
+
+| Metric | Meaning |
+|--------|---------|
+| `detection_precision` | share of flagged clients that the config actually made malicious |
+| `detection_recall` | share of the config's malicious clients that the defense flagged |
+| `detection_f1` | harmonic mean of the two |
+| `detection_false_positives` | honest clients the defense wrongly flagged |
+| `detection_missed` | malicious clients the defense never flagged |
+
+Ground truth is the union of `target_clients` over the attacks that make a client
+malicious, which are `backdoor`, `label_flip`, `sign_flip`, `gaussian`, and
+`model_replacement`. `dlg` and `membership_inference` are deliberately excluded, because an
+honest-but-curious server names a *victim* rather than an adversary, and counting one would
+mark an honest client as a detection the defense owed you.
+
+The listener records nothing when a run has no detector, or when an attack leaves
+`target_clients` unset and every client is therefore malicious, so adding it to any config
+is safe. `examples/configs/fldetector.yaml` enables it, and the `fldetector` arm reports
+precision 1.0000 and recall 1.0000 against zero false positives, while the `undefended` and
+`median` arms show a dash.
+
+A zero-division follows scikit-learn's `zero_division=0`: a detector that flagged nobody
+scores 0 rather than a vacuous 1.
+
 ## Run parameters recorded beside the metrics
 
 Each run's `params` in the JSON report carries its fully resolved settings, which includes

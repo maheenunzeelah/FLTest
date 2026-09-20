@@ -20,7 +20,7 @@ num_rounds: 8
 client_lr: 0.05
 dataset_partitions: 40
 max_test_data_size: 1024
-metrics: [accuracy, loss, per_client]
+metrics: [accuracy, loss, per_client, detection]
 
 attacks:
   - {name: sign_flip, params: {scale: 3.0}, target_clients: [0, 1]}
