@@ -208,11 +208,24 @@ def _fmt_param(key: str, value) -> str:
     return str(value)
 
 
+#: Metrics whose interesting range spans orders of magnitude. Four decimal places print an
+#: MPC error of 8.7e-09 and one of 1.9e-05 identically as 0.0000, hiding the 2200x gap that
+#: is the whole signal, so these switch to scientific notation outside the readable band.
+_WIDE_RANGE_METRICS = {
+    "mpc_agg_max_abs_error",
+    "mpc_agg_rel_error",
+    "secagg_mask_residual",
+    "reconstruction_mse",
+}
+
+
 def _fmt_metric(key: str, value) -> str:
     if value is None:
         return "-"
     if key == "reconstruction_psnr":
         return f"{value:.1f}"
+    if key in _WIDE_RANGE_METRICS and value != 0 and not (1e-3 <= abs(value) < 1e5):
+        return f"{value:.2e}"
     return f"{value:.4f}"
 
 

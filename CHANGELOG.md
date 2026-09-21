@@ -27,6 +27,13 @@ that flagged nobody scores zero rather than a vacuous one, following scikit-lear
 `examples/configs/fldetector.yaml` enables it. The `fldetector` arm reports precision 1.0000
 and recall 1.0000 with zero false positives, against the two clients the config attacked.
 
+**Reporting.** Metrics whose interesting range spans orders of magnitude now print in
+scientific notation outside the readable band. The run matrix formatted every metric at four
+decimal places, so an MPC error of 7.45e-09 and one of 1.91e-05 both printed as `0.0000`,
+hiding the 2200x gap that is the entire signal of the `low_precision` arm in
+`examples/configs/mpc_aggregation.yaml`. This covers `mpc_agg_max_abs_error`,
+`mpc_agg_rel_error`, `secagg_mask_residual`, and `reconstruction_mse`.
+
 This is the defense precision and recall the Q2 review deck claimed and the repository did
 not have.
 
