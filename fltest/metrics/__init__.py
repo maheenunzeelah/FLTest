@@ -14,6 +14,7 @@ BUILTIN_METRICS = {
     "accuracy": "fltest.metrics.listeners",
     "loss": "fltest.metrics.listeners",
     "per_client": "fltest.metrics.listeners",
+    "detection": "fltest.metrics.detection",
 }
 
 for _name, _module in BUILTIN_METRICS.items():

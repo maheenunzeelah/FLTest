@@ -98,6 +98,7 @@ fltest run examples/configs/model_replacement.yaml # boosted backdoor, reference
 fltest run examples/configs/little_is_enough.yaml  # Byzantine attack that Krum still selects
 fltest run examples/configs/little_is_enough_defenses.yaml # how much each rule concedes
 fltest run examples/configs/secure_agg.yaml        # DLG vs no defense / DP noise / masking
+fltest run examples/configs/mpc_aggregation.yaml   # what the finite ring costs: quantization, overflow, dropouts
 
 # detection: name the attackers instead of out-voting them
 fltest run examples/configs/fldetector.yaml

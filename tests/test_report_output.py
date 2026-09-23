@@ -140,3 +140,16 @@ def test_non_numeric_metrics_do_not_become_columns(capsys):
     assert "fld-flagged" in out            # the numeric one is a column
     assert "fldetector_scores" not in out  # the structured ones stay in the JSON report
     assert "fldetector_detected_clients" not in out
+
+
+def test_a_tiny_mpc_error_is_not_rounded_away():
+    """0.0000 for both a 8.7e-09 error and a 1.9e-05 one would hide the whole signal."""
+    from fltest.testing.report import _fmt_metric
+
+    assert _fmt_metric("mpc_agg_max_abs_error", 8.692e-09) == "8.69e-09"
+    assert _fmt_metric("mpc_agg_max_abs_error", 1.912e-05) == "1.91e-05"
+    assert _fmt_metric("mpc_agg_max_abs_error", 11.1569) == "11.1569"
+    assert _fmt_metric("mpc_agg_max_abs_error", 0.0) == "0.0000"
+    assert _fmt_metric("reconstruction_mse", 1.044e10) == "1.04e+10"
+    # An ordinary metric keeps its fixed-width form.
+    assert _fmt_metric("accuracy", 0.86621) == "0.8662"

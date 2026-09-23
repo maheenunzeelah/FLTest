@@ -153,6 +153,53 @@ fltest run examples/configs/secure_agg.yaml
 Compare `reconstruction_mse` across `none`, `gradient_noise`, and `secure_agg`; higher is a
 worse reconstruction, i.e. a better defense. Check `secagg_mask_to_update_ratio` first — if it
 is not comfortably above 1, the arm proves nothing and `mask_scale` needs raising.
+
+## Worked example: what the finite ring costs
+
+`examples/configs/mpc_aggregation.yaml` runs the same MNIST job five ways, with one arm per
+failure mode. Start with the static check, which reads the parameters and trains nothing.
+
+```bash
+fltest pitfalls examples/configs/mpc_aggregation.yaml
+```
+
+Three arms are flagged before a single round runs. For example, the `small_ring` arm draws
+`MPC ring too small for its precision`, which reports that `quant_bits=16` with
+`modulus=4096` can represent only `|value| < 0.0312`.
+
+```bash
+fltest run examples/configs/mpc_aggregation.yaml
+```
+
+| run | accuracy | loss | `mpc-err` | `mpc-ovf` | `mpc-drops` |
+|---|:-:|:-:|:-:|:-:|:-:|
+| `mpc_ok` | 0.8662 | 0.4633 | 0.0000 | 0.0000 | 0.0000 |
+| `exact` (plain FedAvg) | 0.8662 | 0.4630 | - | - | - |
+| `low_precision` | 0.8652 | 0.4630 | 0.0000 | 0.0000 | 0.0000 |
+| `small_ring` | 0.1064 | 2.3026 | 0.0301 | 1.0000 | 0.0000 |
+| `dropouts` | 0.1416 | 2609.69 | 11.1569 | 0.0156 | 2.0000 |
+
+The `mpc_ok` arm matches plain FedAvg to four decimals, which is what a correct protocol
+must produce. The two loud arms fail differently. `small_ring` wraps every value it
+aggregates, so accuracy sits at chance while the aggregate stays finite and plausible.
+`dropouts` leaves two clients' pairwise masks in the sum, and that residue pushes the loss
+to 2609.69.
+
+`low_precision` is the arm that argues for running the static check. Its accuracy of 0.8652
+sits within rounding error of the correct 0.8662, so no accuracy threshold would catch it.
+The parameter check does, because `quant_bits=4` leaves four fractional bits for updates
+that need more.
+
+Finally, test the property that no accuracy number can express.
+
+```bash
+fltest metamorphic examples/configs/mpc_aggregation.yaml
+```
+
+The `secagg_lossless` relation redraws the masks under seeds 1, 2, and 3 and requires the
+aggregate to come out identical. The healthy arm reports `spread=0` against a tolerance of
+exactly zero.
+
 **`fldetector`** — compares each client's model delta with a limited-memory BFGS
 prediction from earlier rounds. It scores inconsistencies over `window_size` rounds and
 uses gap statistics and two-cluster k-means to identify the high-score group. Identified

@@ -5,6 +5,38 @@ versioning](https://semver.org). The patch number changes for a fix and the mino
 for new capability that leaves existing configs working. The major number changes when the
 configuration schema or the plugin API breaks.
 
+## 0.11.0
+
+**Detection quality.** Added the `detection` metric listener. A detector's accuracy column
+measures the model, not the detection, and accuracy alone cannot separate a detector that
+flagged the two attackers from one that also flagged an honest client, because both produce
+nearly the same recovery curve. The listener compares the flagged set against the ground
+truth the config already carries and records `detection_precision`, `detection_recall`,
+`detection_f1`, `detection_false_positives`, and `detection_missed`.
+
+Ground truth is the union of `target_clients` over the attacks that make a client malicious,
+which are `backdoor`, `label_flip`, `sign_flip`, `gaussian`, and `model_replacement`. `dlg`
+and `membership_inference` are excluded, since an honest-but-curious server names a victim
+rather than an adversary and counting one would mark an honest client as a detection the
+defense owed us. The listener records nothing when a run has no detector, or when an attack
+leaves `target_clients` unset and every client is malicious, so adding it to any config is
+safe and an arm without a detector prints a dash instead of a misleading zero. A detector
+that flagged nobody scores zero rather than a vacuous one, following scikit-learn's
+`zero_division=0`.
+
+`examples/configs/fldetector.yaml` enables it. The `fldetector` arm reports precision 1.0000
+and recall 1.0000 with zero false positives, against the two clients the config attacked.
+
+**Reporting.** Metrics whose interesting range spans orders of magnitude now print in
+scientific notation outside the readable band. The run matrix formatted every metric at four
+decimal places, so an MPC error of 7.45e-09 and one of 1.91e-05 both printed as `0.0000`,
+hiding the 2200x gap that is the entire signal of the `low_precision` arm in
+`examples/configs/mpc_aggregation.yaml`. This covers `mpc_agg_max_abs_error`,
+`mpc_agg_rel_error`, `secagg_mask_residual`, and `reconstruction_mse`.
+
+This is the defense precision and recall the Q2 review deck claimed and the repository did
+not have.
+
 ## 0.10.1
 
 **Documentation.** Swept every public page against the code after four collaborator merges.
