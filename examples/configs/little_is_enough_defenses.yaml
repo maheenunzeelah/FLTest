@@ -1,0 +1,50 @@
+# Which aggregation rules does A Little Is Enough actually get past?
+#
+# The same attack (4 of 10 clients, z = 1.5) against each aggregation rule in turn. Read
+# the `little_is_enough_absorption` column: it is the share of the shift the attacker asked
+# for that the aggregation rule conceded, so 0 means fully filtered and 1 means swallowed
+# whole. Plain FedAvg is the reference line, because averaging concedes exactly the
+# attackers' share of the round's sample weight — equal shards here, 4 of 10 clients, so
+# 0.40. A rule scoring above 0.40 is doing worse than having no defense at all.
+#
+# Deliberately small and fast; it measures how much each rule concedes, not convergence.
+#
+#   fltest run examples/configs/little_is_enough_defenses.yaml
+name: little_is_enough_defenses
+device: cpu
+dataset: mnist
+model_name: MLP
+num_clients: 10
+num_rounds: 4
+client_lr: 0.05
+dataset_partitions: 120
+max_test_data_size: 1024
+metrics: [accuracy, loss]
+
+runs:
+  - framework: reference
+    name: no-attack-fedavg
+    attacks: []
+
+  - framework: reference
+    name: attack-fedavg
+    attacks:
+      - {name: little_is_enough, params: {z: 1.5}, target_clients: [0, 1, 2, 3]}
+
+  - framework: reference
+    name: attack-krum
+    defenses: [{name: krum, params: {num_byzantine: 4}}]
+    attacks:
+      - {name: little_is_enough, params: {z: 1.5}, target_clients: [0, 1, 2, 3]}
+
+  - framework: reference
+    name: attack-median
+    defenses: [{name: median}]
+    attacks:
+      - {name: little_is_enough, params: {z: 1.5}, target_clients: [0, 1, 2, 3]}
+
+  - framework: reference
+    name: attack-trimmed-mean
+    defenses: [{name: trimmed_mean, params: {trim: 2}}]
+    attacks:
+      - {name: little_is_enough, params: {z: 1.5}, target_clients: [0, 1, 2, 3]}

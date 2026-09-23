@@ -43,8 +43,10 @@ makes a rigorous setup the default and *checks* for the common pitfalls.
   share one `HookContext`. A plugin written once runs across every backend, and several
   plugins compose on a single run.
 - **Attacks:** `label_flip`, `sign_flip`, `gaussian`, `backdoor` and `model_replacement`
-  (with attack-success-rate), `dlg` (gradient-inversion privacy attack), and
-  `membership_inference` (loss-threshold privacy attack, scored as AUC each round).
+  (with attack-success-rate), `little_is_enough` (Byzantine attack sized to the honest
+  clients' own variance, so robust aggregation keeps selecting it), `dlg`
+  (gradient-inversion privacy attack), and `membership_inference` (loss-threshold privacy
+  attack, scored as AUC each round).
 - **Defenses (PPFL):** `gradient_noise` (DP-style clip+noise), `norm_clip`, robust
   aggregation `krum` / `trimmed_mean` / `median`, and secure aggregation
   `secure_aggregation` (float pairwise masking) / `mpc_aggregation` (fixed point in a
@@ -93,6 +95,8 @@ fltest run examples/configs/exhaustive_eval.yaml
 fltest run examples/configs/membership_inference.yaml
 fltest run examples/configs/dlg.yaml               # gradient inversion
 fltest run examples/configs/model_replacement.yaml # boosted backdoor, reference + Flower
+fltest run examples/configs/little_is_enough.yaml  # Byzantine attack that Krum still selects
+fltest run examples/configs/little_is_enough_defenses.yaml # how much each rule concedes
 fltest run examples/configs/secure_agg.yaml        # DLG vs no defense / DP noise / masking
 
 # detection: name the attackers instead of out-voting them

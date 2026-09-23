@@ -1,0 +1,54 @@
+# A Little Is Enough (Baruch et al., NeurIPS 2019) against Krum.
+#
+# Four of ten clients are adversarial in every attacked run, and Krum defends all of them.
+# The sweep over `z` is the point of the paper: the perturbation has to stay inside the
+# honest clients' own spread, or Krum stops selecting it and the attack buys nothing over
+# the naive Gaussian baseline.
+#
+# Watch `little_is_enough_absorption`, not accuracy. Absorption is 1.00 up to z = 1.5 (Krum
+# takes the craft whole) and drops to ~0 by z = 3.0 (filtered), the same every seed. Accuracy
+# at this scale swings by about +/- 0.02 between seeds, which is wider than anything the
+# attack does to it, so a single run will mislead you. See docs/attacks.md for five seeds.
+#
+# Leaving `z` unset uses the paper's z_max for the given client counts, which is only 0.43
+# at 4 attackers out of 10 — stealthy, and in practice harmless. Set `z` to sweep strength.
+#
+#   fltest run examples/configs/little_is_enough.yaml
+name: little_is_enough_demo
+device: cpu
+dataset: mnist
+model_name: MLP
+num_clients: 10
+num_rounds: 8
+client_lr: 0.05
+dataset_partitions: 60
+max_test_data_size: 1024
+metrics: [accuracy, loss]
+
+defenses:
+  - {name: krum, params: {num_byzantine: 4}}
+
+runs:
+  - framework: reference
+    name: baseline-no-attack
+    attacks: []
+
+  - framework: reference
+    name: lie-auto-z
+    attacks:
+      - {name: little_is_enough, target_clients: [0, 1, 2, 3]}
+
+  - framework: reference
+    name: lie-z-1.5
+    attacks:
+      - {name: little_is_enough, params: {z: 1.5}, target_clients: [0, 1, 2, 3]}
+
+  - framework: reference
+    name: lie-z-3.0
+    attacks:
+      - {name: little_is_enough, params: {z: 3.0}, target_clients: [0, 1, 2, 3]}
+
+  - framework: reference
+    name: gaussian-baseline
+    attacks:
+      - {name: gaussian, params: {sigma: 0.5}, target_clients: [0, 1, 2, 3]}

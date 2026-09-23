@@ -11,8 +11,8 @@ attacks:
 Multiple attacks compose. `target_clients` restricts which clients are adversarial.
 
 `backdoor` and `dlg` operate on pixels, so they apply only to image datasets and raise a
-clear error on a text run. `label_flip`, `sign_flip`, `gaussian`, and `model_replacement`
-work on labels or updates, so they apply to either modality.
+clear error on a text run. `label_flip`, `sign_flip`, `gaussian`, `model_replacement`, and
+`little_is_enough` work on labels or updates, so they apply to either modality.
 
 ## Catalog
 
@@ -22,6 +22,7 @@ work on labels or updates, so they apply to either modality.
 | `gaussian` | model poisoning (naive) | `after_client_train` | `sigma` (0.1) |
 | `sign_flip` | model poisoning | `after_client_train` | `scale` (1.0) |
 | `model_replacement` | model poisoning (targeted) | `after_client_train` | `scale` (automatic), `target_round` |
+| `little_is_enough` | model poisoning (Byzantine, evasive) | `before_aggregate` | `z` (automatic), `target_clients` (required) |
 | `backdoor` | data poisoning (targeted) | `before_client_train`, `after_round` | `target_label` (0), `infection_rate` (0.3), `patch_size` (4), `patch_value` (1.0) |
 | `dlg` | privacy (gradient inversion) | `before_client_train` (+ `before_aggregate` in shared_update mode) | `target_client`, `target_round`, `num_images`, `iters`, `source` |
 | `membership_inference` | privacy (inference) | `on_data_distribute`, `after_round` | `target_client` (0), `max_samples` (512) |
@@ -63,6 +64,114 @@ model only in round 3, at an automatic scale of 4.0. Replacement takes attack su
 | reference | model replacement | 1.0000 | 0.8730 |
 | Flower | backdoor only | 0.2724 | 0.8867 |
 | Flower | model replacement | 0.9892 | 0.8506 |
+
+**`little_is_enough`** — a Byzantine attack that measures the honest population before
+perturbing it, from Baruch et al., [*A Little Is Enough: Circumventing Defenses For
+Distributed Learning*](https://proceedings.neurips.cc/paper/2019/hash/ec1c59141046cd1866bbbcdfb6ae31d4-Abstract.html).
+`gaussian` and `sign_flip` perturb an update without reference to the honest ones, so a
+perturbation big enough to matter is also an outlier — exactly what `krum`, `median` and
+`trimmed_mean` filter. This attack instead sets every attacker's update to the benign mean
+shifted by a fraction of the benign standard deviation, per coordinate:
+
+```
+u' = mu - z * sigma
+```
+
+With `n` participants and `m` attackers, `s = floor(n/2 + 1) - m` honest workers are needed
+to complete a majority, and the default `z` is the largest value with
+`Phi(z) < (n - m - s) / (n - m)` — the most an attacker can move while still sitting inside
+the range a majority of honest workers occupy. The attack runs at `before_aggregate`, where
+FLTest exposes every submission, and rewrites only the attackers' entries; attacks attach
+before defenses, so a robust aggregator in the same config still sees the crafted updates.
+`target_clients` is required, because the crafted update is built from the *other* clients'
+submissions. NVFlare does not emit `before_aggregate` and cannot run this attack.
+
+**Reading the outcome.** Accuracy alone is a poor success signal for an untargeted Byzantine
+attack, so the attack scores itself at `after_aggregate`. It records the `z` it asked for,
+`little_is_enough_drift` (how far the aggregate actually landed from the benign mean, in
+benign standard deviations) and `little_is_enough_absorption` (`drift / z` — the share of the
+requested shift the defense conceded). The anchor for reading absorption is plain FedAvg,
+which concedes exactly the attackers' share of the round's total sample weight — `m/n` when
+every client holds an equal shard, and their data share otherwise. A defense scoring above
+its own FedAvg line is doing worse than no defense at all.
+
+Measured over one aggregation round on a controlled population of ten clients, four of them
+adversarial, so the numbers isolate what each rule concedes rather than how training then
+unfolds (`little_is_enough_defenses.yaml` runs the trained version):
+
+| Aggregation | `z = 1.0` | `z = 1.5` | `z = 3.0` |
+|-------------|----------:|----------:|----------:|
+| FedAvg (no defense), 4 of 10 attackers | 0.40 | 0.40 | 0.40 |
+| `krum` | 1.00 | 1.00 | 0.00 |
+| `median` | 0.85 | 0.69 | 0.36 |
+| `trimmed_mean`, `trim: 2` | 0.63 | 0.57 | 0.46 |
+
+Krum concedes everything while it accepts the craft, because it returns one selected update
+and that update is the attacker's — strictly worse than averaging. It drops to zero the
+moment `z` puts the craft outside the honest spread. The coordinate-wise rules never fully
+accept or reject: they concede a share that *falls* as `z` grows, because pushing an already
+extreme value further does not move a median.
+
+`little_is_enough_defenses.yaml` runs the trained version at `z = 1.5`, four rounds, over the
+same five seeds:
+
+| Run | Accuracy | Absorption |
+|-----|---------:|-----------:|
+| no attack, FedAvg | 0.8283 ± 0.0142 | – |
+| attack, FedAvg (no defense) | 0.7939 ± 0.0225 | 0.4000 ± 0.0000 |
+| attack, `krum` | 0.7582 ± 0.0332 | 1.0000 ± 0.0000 |
+| attack, `median` | 0.7783 ± 0.0243 | 0.6892 ± 0.0019 |
+| attack, `trimmed_mean`, `trim: 2` | 0.7873 ± 0.0225 | 0.5616 ± 0.0017 |
+
+**Every robust rule here concedes more than plain averaging does.** Against this attack the
+protection ordering runs backwards: no defense (0.40) is the most resistant, then
+`trimmed_mean` (0.56), then `median` (0.69), and `krum` (1.00) hands over the whole model.
+
+Note how differently the two columns behave. Absorption is reproducible to the fourth decimal
+across seeds; accuracy varies by ±0.02 to ±0.03, which is wider than the gaps between the
+rows. So the absorption ordering is a result, and the matching accuracy ordering is not — it
+may well be coincidence at this scale. Krum's accuracy spread is the widest of all (±0.0332),
+which is Krum itself rather than the attack: even when it defends successfully it keeps one
+update and discards nine, so the round's model is whichever client it happened to pick.
+
+The runnable sweep puts four attackers among ten clients behind Krum for eight rounds, over
+five seeds (786, 101, 202, 303, 404):
+
+| Run | `z` | Accuracy | Absorption | Krum's pick |
+|-----|----:|---------:|-----------:|-------------|
+| no attack | – | 0.8559 ± 0.0222 | – | an honest client |
+| `little_is_enough` (automatic) | 0.4307 | 0.8775 ± 0.0161 | 1.00 | the attacker |
+| `little_is_enough` | 1.5 | 0.8473 ± 0.0244 | 1.00 | the attacker |
+| `little_is_enough` | 3.0 | 0.8303 ± 0.0691 | 0.03 | an honest client |
+| `gaussian`, `sigma: 0.5` | – | 0.8303 ± 0.0691 | – | an honest client |
+
+**Evasion is reliable here; damage is not.** Absorption is 1.00 at both `z = 0.43` and
+`z = 1.5` in every seed — Krum takes the crafted update whole, every round, deterministically.
+That is the attack working exactly as the paper describes, and it is the result to quote.
+
+Accuracy is a different story. At `z = 1.5` the attack costs 0.9 points against a baseline
+whose own seed-to-seed spread is ±0.022, so at this scale getting past Krum buys the attacker
+nothing measurable. Do not read the middle row as damage. An earlier single-seed run of this
+same config showed a 4.6-point drop at `z = 1.5`; four more seeds showed that was the seed,
+not the attack.
+
+Two findings do survive the seeds. The automatic `z` of 0.43 makes accuracy *rise*, in four
+of five seeds: the craft sits so close to the benign mean that Krum selecting it beats Krum's
+usual pick of one client's noisy update, so the attacker is invisible and actively unhelpful
+to itself. And at `z = 3.0` the craft has left the honest spread, Krum rejects it (absorption
+0.03), and the run becomes identical to the filtered `gaussian` baseline — not similar,
+identical, in all five seeds, because both are filtered and Krum falls back to the same
+honest client.
+
+The lesson for using this attack is that accuracy is too noisy to evaluate it at this scale.
+Score it with `little_is_enough_absorption`, which is deterministic and separates "the defense
+filtered me" from "the defense took the bait."
+
+The automatic `z` is small whenever attackers are a small fraction of the round: it is 0
+below roughly `n/2` attackers and reaches the paper's headline 1.43 only at 24 attackers out
+of 50. Treat it as the stealth ceiling, not as a recommended strength, and sweep `z`
+(`attack_strength` in [metamorphic testing](metamorphic-testing.md)) to find where a defense
+actually breaks.
 
 **`backdoor`** — the attacker stamps a bright patch on a fraction (`infection_rate`) of its
 images and relabels them to `target_label`; the global model learns
@@ -121,6 +230,15 @@ dataset: cifar10
 attacks: [{name: dlg, params: {target_client: 0, target_round: 1, iters: 300, source: gradient}}]
 ```
 
-Runnable: `examples/configs/attack_label_flip.yaml`, `model_replacement.yaml`, `dlg.yaml`.
+```yaml
+# Byzantine attack sized to the honest spread; sweep z to find where the defense breaks
+defenses: [{name: krum, params: {num_byzantine: 4}}]
+attacks: [{name: little_is_enough, params: {z: 1.5}, target_clients: [0, 1, 2, 3]}]
+```
+
+Runnable: `examples/configs/attack_label_flip.yaml`, `model_replacement.yaml`,
+`little_is_enough.yaml` (strength sweep against Krum),
+`little_is_enough_defenses.yaml` (the same attack against each aggregation rule),
+`dlg.yaml`.
 
 To add your own attack, see **[Port your attacks & defenses](extending.md)**.

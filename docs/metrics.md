@@ -26,6 +26,9 @@ The test subset size is `max_test_data_size`. These three appear in `final` for 
 | `membership_inference_auc` | `membership_inference` attack | probability that a random training sample looks more member-like than a random held-out one; 0.5 is no leakage, 1.0 is perfect separation |
 | `membership_loss_gap` | `membership_inference` attack | mean held-out loss minus mean training loss, which is the overfitting gap the attack exploits |
 | `model_replacement_scale` | `model_replacement` attack | factor applied to the malicious client's delta from the current global model |
+| `little_is_enough_z` | `little_is_enough` attack | standard deviations the crafted update sits from the benign mean; large enough to hurt and small enough to stay selected is the whole attack |
+| `little_is_enough_drift` | `little_is_enough` attack | how far the round's aggregate actually landed from the benign mean, in benign standard deviations — the shift the attack really achieved |
+| `little_is_enough_absorption` | `little_is_enough` attack | `drift / z`: the fraction of the requested shift the defense conceded. 0 means fully filtered, 1 means the crafted update was taken wholesale. Plain FedAvg concedes the attackers' share of total sample weight (`m/n` for equal shards), so anything above that line is a defense doing worse than no defense |
 | `per_client_acc_mean` / `per_client_acc_min` | `per_client` listener | personalized accuracy of the final global model on each client's own data — `min` exposes representation disparity (project Pitfall-3) |
 
 Add `per_client` to `metrics:` to enable personalized evaluation. Attack metrics appear

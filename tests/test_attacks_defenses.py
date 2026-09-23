@@ -1,6 +1,7 @@
 """Unit tests for attacks/defenses operating on the canonical ndarray update."""
 
 import numpy as np
+import pytest
 import torch
 
 from fltest.core.hook_context import HookContext
@@ -107,6 +108,212 @@ def test_model_replacement_reaches_target_under_equal_weight_fedavg():
         (ctx.client_update, 1), (benign, 1), (benign, 1), (benign, 1),
     ])
     assert np.allclose(aggregated[0], target[0])
+
+
+# --- little is enough ------------------------------------------------------------------
+
+def _lie_round(values, attackers, num_clients=None, **kw):
+    """Run the attack over one scalar-layer submission per client."""
+    from fltest.attacks.little_is_enough import LittleIsEnoughAttack
+
+    uw = [([np.full((2,), v, dtype=np.float32)], 10) for v in values]
+    ctx = HookContext(
+        cfg=_spec(num_clients=num_clients or len(values)), round=1, updates_and_weights=uw,
+    )
+    LittleIsEnoughAttack(target_clients=attackers, **kw).before_aggregate(ctx)
+    return ctx
+
+
+def test_little_is_enough_z_is_the_largest_step_that_stays_covered():
+    """The property z is defined by: enough honest workers must lie further out than the craft.
+
+    Checked against the criterion itself rather than against a remembered constant, so the
+    test still means something if the derivation is ever revisited.
+    """
+    from statistics import NormalDist
+
+    n, m = 50, 24
+    s = n // 2 + 1 - m  # honest workers needed to complete a majority alongside the attackers
+    z = _lie_round([1.0] * n, attackers=list(range(m))).metrics["little_is_enough_z"]
+
+    def honest_further_out(step):
+        return (n - m) * (1 - NormalDist().cdf(step))
+
+    assert honest_further_out(z) >= s - 1e-9  # this step is still covered
+    assert honest_further_out(z + 0.01) < s  # any larger step is not
+    assert z == pytest.approx(1.426, abs=0.001)  # regression guard on the value itself
+
+
+def test_little_is_enough_crafts_the_benign_mean_shifted_by_z_sigma():
+    # Benign 1, 2, 3; the attackers' own 9.0 must not enter the statistics.
+    ctx = _lie_round([1.0, 2.0, 3.0, 9.0, 9.0], attackers=[3, 4], z=1.5)
+
+    expected = 2.0 - 1.5 * float(np.std([1.0, 2.0, 3.0]))
+    for pos in (3, 4):
+        update, num_samples = ctx.updates_and_weights[pos]
+        assert np.allclose(update[0], expected)
+        assert update[0].dtype == np.float32
+        assert num_samples == 10  # sample weight survives, only the update is replaced
+    for pos, benign in enumerate([1.0, 2.0, 3.0]):
+        assert np.allclose(ctx.updates_and_weights[pos][0][0], benign)
+    assert ctx.metrics["little_is_enough_z"] == 1.5
+
+
+def test_little_is_enough_survives_krum_where_a_naive_outlier_does_not():
+    """The point of the attack: stay inside the honest spread, so the filter keeps it."""
+    from fltest.attacks.little_is_enough import LittleIsEnoughAttack
+    from fltest.defenses.krum import KrumDefense
+
+    rng = np.random.default_rng(0)
+    num_clients, num_attackers, dim = 10, 4, 50
+    honest = [
+        [(np.ones(dim) + rng.normal(0, 0.1, dim)).astype(np.float32)]
+        for _ in range(num_clients)
+    ]
+    attackers = list(range(num_clients - num_attackers, num_clients))
+
+    crafted_round = HookContext(
+        cfg=_spec(num_clients=num_clients), round=1,
+        updates_and_weights=[(u, 1) for u in honest],
+    )
+    LittleIsEnoughAttack(target_clients=attackers).before_aggregate(crafted_round)
+    crafted = crafted_round.updates_and_weights[attackers[0]][0][0]
+
+    KrumDefense(num_byzantine=num_attackers).before_aggregate(crafted_round)
+    assert np.allclose(crafted_round.updates_and_weights[0][0][0], crafted)
+
+    # Same clients, same defense, but perturbed without regard for the honest spread.
+    naive = [(list(u), 1) for u in honest]
+    for pos in attackers:
+        naive[pos] = ([(honest[pos][0] + rng.normal(0, 5.0, dim)).astype(np.float32)], 1)
+    naive_round = HookContext(
+        cfg=_spec(num_clients=num_clients), round=1, updates_and_weights=naive,
+    )
+    KrumDefense(num_byzantine=num_attackers).before_aggregate(naive_round)
+    selected = naive_round.updates_and_weights[0][0][0]
+    assert not any(np.allclose(selected, naive[pos][0][0]) for pos in attackers)
+
+
+def test_little_is_enough_identifies_attackers_by_client_id():
+    """Client selection makes position and identity diverge; identity must win."""
+    from fltest.attacks.little_is_enough import LittleIsEnoughAttack
+    from fltest.core.hook_context import ClientSubmission
+
+    updates = [[np.full((2,), v, dtype=np.float32)] for v in (1.0, 2.0, 3.0)]
+    selected = (5, 7, 9)  # round selected clients 5, 7 and 9, in that order
+    ctx = HookContext(
+        cfg=_spec(num_clients=10), round=1,
+        updates_and_weights=[(u, 10) for u in updates],
+        client_submissions=tuple(
+            ClientSubmission(cid, tuple(u), 10) for cid, u in zip(selected, updates)
+        ),
+    )
+    LittleIsEnoughAttack(target_clients=[7], z=0.0).before_aggregate(ctx)
+
+    # Client 7 sits at position 1; with z=0 it submits the mean of clients 5 and 9.
+    assert np.allclose(ctx.updates_and_weights[1][0][0], 2.0)
+    assert np.allclose(ctx.updates_and_weights[0][0][0], 1.0)
+    assert np.allclose(ctx.updates_and_weights[2][0][0], 3.0)
+
+
+def _lie_scored_round(defense, z, num_clients=10, num_attackers=4, dim=400):
+    """Craft, aggregate as the backend would, then let the attack score the outcome."""
+    from fltest.attacks.little_is_enough import LittleIsEnoughAttack
+    from fltest.data.utils import aggregate_ndarrays
+
+    rng = np.random.default_rng(0)
+    honest = [
+        [(np.ones(dim) + rng.normal(0, 0.1, dim)).astype(np.float32)]
+        for _ in range(num_clients)
+    ]
+    attackers = list(range(num_clients - num_attackers, num_clients))
+    ctx = HookContext(
+        cfg=_spec(num_clients=num_clients), round=1,
+        updates_and_weights=[(list(u), 1) for u in honest],
+    )
+    attack = LittleIsEnoughAttack(target_clients=attackers, z=z)
+    attack.before_aggregate(ctx)
+    if defense is not None:
+        defense.before_aggregate(ctx)
+    ctx.new_global_state = aggregate_ndarrays(ctx.updates_and_weights)
+    attack.after_aggregate(ctx)
+    return ctx
+
+
+def test_little_is_enough_absorption_under_plain_fedavg_is_the_attacker_fraction():
+    """Averaging concedes exactly m/n of the requested shift, which anchors the metric."""
+    ctx = _lie_scored_round(defense=None, z=1.5)
+    assert ctx.metrics["little_is_enough_absorption"] == pytest.approx(0.4, abs=0.01)
+    assert ctx.metrics["little_is_enough_drift"] == pytest.approx(0.6, abs=0.02)
+
+
+def test_little_is_enough_absorption_reads_out_whether_krum_took_the_craft():
+    from fltest.defenses.krum import KrumDefense
+
+    taken = _lie_scored_round(defense=KrumDefense(num_byzantine=4), z=1.5)
+    # Krum returns a single selected update, so absorption is all or nothing.
+    assert taken.metrics["little_is_enough_absorption"] == pytest.approx(1.0, abs=0.01)
+
+    filtered = _lie_scored_round(defense=KrumDefense(num_byzantine=4), z=3.0)
+    assert filtered.metrics["little_is_enough_absorption"] == pytest.approx(0.0, abs=0.01)
+
+
+def test_little_is_enough_scores_nothing_when_no_attacker_participates():
+    from fltest.attacks.little_is_enough import LittleIsEnoughAttack
+
+    ctx = _lie_round([1.0, 2.0, 3.0], attackers=[7], num_clients=10)
+    ctx.new_global_state = [np.full((2,), 2.0, dtype=np.float32)]
+    LittleIsEnoughAttack(target_clients=[7]).after_aggregate(ctx)
+    assert "little_is_enough_drift" not in ctx.metrics
+
+
+def test_little_is_enough_keeps_submission_records_aligned():
+    """FLDetector reads the records and rejects a round that has drifted from them."""
+    from fltest.attacks.little_is_enough import LittleIsEnoughAttack
+    from fltest.core.hook_context import ClientSubmission
+
+    updates = [[np.full((2,), v, dtype=np.float32)] for v in (1.0, 2.0, 3.0)]
+    ctx = HookContext(
+        cfg=_spec(num_clients=3), round=1,
+        updates_and_weights=[(u, 10) for u in updates],
+        client_submissions=tuple(
+            ClientSubmission(cid, tuple(u), 10) for cid, u in enumerate(updates)
+        ),
+    )
+    LittleIsEnoughAttack(target_clients=[2], z=1.0).before_aggregate(ctx)
+
+    for record, (update, _) in zip(ctx.client_submissions, ctx.updates_and_weights):
+        assert len(record.update) == len(update)
+        assert all(a is b for a, b in zip(record.update, update))
+    assert [r.client_id for r in ctx.client_submissions] == [0, 1, 2]
+    assert not np.allclose(ctx.client_submissions[2].update[0], 3.0)  # record shows the craft
+
+
+def test_little_is_enough_is_quiet_when_no_attacker_participates():
+    ctx = _lie_round([1.0, 2.0, 3.0], attackers=[7], num_clients=10)
+    for pos, benign in enumerate([1.0, 2.0, 3.0]):
+        assert np.allclose(ctx.updates_and_weights[pos][0][0], benign)
+    assert "little_is_enough_z" not in ctx.metrics
+
+
+def test_little_is_enough_leaves_integer_buffers_intact():
+    from fltest.attacks.little_is_enough import LittleIsEnoughAttack
+
+    updates, weights = _updates_with_an_integer_buffer(num_clients=3)
+    ctx = HookContext(cfg=_spec(num_clients=3), round=1,
+                      updates_and_weights=list(zip(updates, weights)))
+    LittleIsEnoughAttack(target_clients=[2], z=1.0).before_aggregate(ctx)
+
+    crafted = ctx.updates_and_weights[2][0]
+    assert crafted[1] == 7 and crafted[1].dtype == np.int64
+    assert crafted[0].dtype == np.float32
+
+
+def test_little_is_enough_requires_named_attackers():
+    from fltest.attacks.little_is_enough import LittleIsEnoughAttack
+
+    with pytest.raises(ValueError, match="target_clients"):
+        LittleIsEnoughAttack()
 
 
 def test_gradient_noise_clips_delta_norm():
