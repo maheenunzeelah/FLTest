@@ -53,7 +53,7 @@ fltest list
 # Defenses:   ['fldetector', 'gradient_noise', 'krum', 'median', 'mpc_aggregation', 'norm_clip', 'secure_aggregation', 'trimmed_mean']
 # Metrics:    ['accuracy', 'loss', 'per_client']
 
-pytest tests/ -q          # 121 passing
+pytest tests/ -q          # 130 passing
 ```
 
 `fltest list` and `fltest pitfalls` return immediately, because neither needs to load a
