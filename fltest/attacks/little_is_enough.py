@@ -79,6 +79,38 @@ class LittleIsEnoughAttack(ThreatModelBaseClass):
         # Below 0.5 no perturbation keeps the majority, and 1.0 would be unbounded.
         return NormalDist().inv_cdf(min(max(ratio, 0.5), 1.0 - 1e-9))
 
+    @staticmethod
+    def _layer_statistics(uw, benign: List[int], num_layers: int):
+        """Per layer: a benign reference array, and the benign mean and deviation.
+
+        Mean and deviation are None for a layer that is not floating point. Integer buffers
+        (BatchNorm's num_batches_tracked and friends) carry no gradient signal, and
+        perturbing one only truncates on the cast back.
+        """
+        stats = []
+        for layer in range(num_layers):
+            arrays = [np.asarray(uw[pos][0][layer]) for pos in benign]
+            reference = arrays[0]
+            if not np.issubdtype(reference.dtype, np.floating):
+                stats.append((reference, None, None))
+                continue
+            stacked = np.stack([a.astype(np.float64) for a in arrays])
+            stats.append((reference, stacked.mean(axis=0), stacked.std(axis=0)))
+        return stats
+
+    def _craft(self, ctx: HookContext, stats, z: float) -> List[np.ndarray]:
+        """Algorithm 3: the benign mean moved ``z`` deviations, coordinate by coordinate."""
+        return [
+            reference.copy() if mean is None
+            else (mean - z * deviation).astype(reference.dtype, copy=False)
+            for reference, mean, deviation in stats
+        ]
+
+    def _craft_each(self, ctx: HookContext, stats, z: float, attackers) -> dict:
+        """Each attacker's submission, by position. By default every attacker sends one craft."""
+        crafted = self._craft(ctx, stats, z)
+        return {pos: crafted for pos in attackers}
+
     def before_aggregate(self, ctx: HookContext) -> None:
         uw = ctx.updates_and_weights
         if not uw or len(uw) < 2:
@@ -94,25 +126,13 @@ class LittleIsEnoughAttack(ThreatModelBaseClass):
             raise ValueError("little_is_enough requires updates of matching length")
 
         z = self._perturbation(len(uw), len(attackers))
-        crafted: List[np.ndarray] = []
-        float_layers, means, deviations = [], [], []
-        for layer in range(num_layers):
-            arrays = [np.asarray(uw[pos][0][layer]) for pos in benign]
-            reference = arrays[0]
-            if not np.issubdtype(reference.dtype, np.floating):
-                # Integer buffers (BatchNorm's num_batches_tracked and friends) carry no
-                # gradient signal, and perturbing one only truncates on the cast back.
-                crafted.append(reference.copy())
-                continue
-            stacked = np.stack([a.astype(np.float64) for a in arrays])
-            mean, deviation = stacked.mean(axis=0), stacked.std(axis=0)
-            crafted.append((mean - z * deviation).astype(reference.dtype, copy=False))
-            float_layers.append(layer)
-            means.append(mean.ravel())
-            deviations.append(deviation.ravel())
-
+        stats = self._layer_statistics(uw, benign, num_layers)
+        crafted = self._craft_each(ctx, stats, z, sorted(attackers))
+        float_layers = [layer for layer, (_, mean, _) in enumerate(stats) if mean is not None]
         self._asked = (
-            (float_layers, np.concatenate(means), np.concatenate(deviations), z)
+            (float_layers,
+             np.concatenate([stats[layer][1].ravel() for layer in float_layers]),
+             np.concatenate([stats[layer][2].ravel() for layer in float_layers]), z)
             if float_layers else None
         )
 
@@ -122,7 +142,7 @@ class LittleIsEnoughAttack(ThreatModelBaseClass):
         records = list(ctx.client_submissions or ())
         aligned = len(records) == len(uw)
         for pos in attackers:
-            submitted = list(crafted)
+            submitted = list(crafted[pos])
             uw[pos] = (submitted, uw[pos][1])
             if aligned:
                 records[pos] = ClientSubmission(

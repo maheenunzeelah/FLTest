@@ -19,7 +19,7 @@ The test subset size is `max_test_data_size`. These three appear in `final` for 
 
 | Metric | Produced by | Meaning |
 |--------|-------------|---------|
-| `attack_success_rate` | `backdoor` attack | fraction of a *triggered* test set predicted as the target label (excludes samples already of the target) |
+| `attack_success_rate` | `backdoor`, `little_is_enough_backdoor`, `little_is_enough_cropped_backdoor` attacks | fraction of a *triggered* test set predicted as the target label (excludes samples already of the target) |
 | `reconstruction_mse` | `dlg` attack | pixel MSE between the reconstructed and true victim image (lower = better reconstruction = worse privacy) |
 | `reconstruction_psnr` | `dlg` attack | peak signal-to-noise ratio of the reconstruction (higher = better reconstruction) |
 | `label_recovery` | `dlg` attack | fraction of victim labels correctly recovered |
@@ -79,10 +79,17 @@ the comparison is measured.
 | `detection_f1` | harmonic mean of the two |
 | `detection_false_positives` | honest clients the defense wrongly flagged |
 | `detection_missed` | malicious clients the defense never flagged |
+| `detection_accuracy` | DACC in the FLDetector paper: the share of all `num_clients` classified correctly, counting an unflagged client as classified benign |
+| `detection_fpr` | share of honest clients flagged as malicious |
+| `detection_fnr` | share of malicious clients left unflagged (`1 - detection_recall`) |
+
+The last three are the FLDetector paper's own detection metrics, so a run can be read
+against its Table 2 directly.
 
 Ground truth is the union of `target_clients` over the attacks that make a client
-malicious, which are `backdoor`, `label_flip`, `sign_flip`, `gaussian`, and
-`model_replacement`. `dlg` and `membership_inference` are deliberately excluded, because an
+malicious, which are `backdoor`, `label_flip`, `sign_flip`, `gaussian`,
+`model_replacement`, `little_is_enough`, `little_is_enough_backdoor`, and
+`little_is_enough_cropped_backdoor`. `dlg` and `membership_inference` are deliberately excluded, because an
 honest-but-curious server names a *victim* rather than an adversary, and counting one would
 mark an honest client as a detection the defense owed you.
 

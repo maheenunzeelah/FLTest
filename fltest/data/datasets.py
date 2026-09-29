@@ -26,7 +26,7 @@ from flwr_datasets.partitioner import (
     NaturalIdPartitioner,
     PathologicalPartitioner,
 )
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
 from fltest.data.utils import seed_everything
@@ -283,6 +283,42 @@ def get_cached_federated_dataset(
     return cache[key]
 
 
+class _InMemoryShard(Dataset):
+    """A prepared split's columns, converted to tensors once.
+
+    ``prepare`` stores transformed images as nested lists, and the torch format rebuilds
+    them element by element on every read. Across a run that is most of the wall-clock
+    time, and a GPU cannot help with it. The conversion here goes through the same torch
+    formatter, just once for the whole split, so every column comes out with the dtype and
+    shape a batch read gives, and batches, shuffling and results are unchanged.
+    """
+
+    def __init__(self, columns: Dict[str, torch.Tensor]):
+        self.columns = columns
+        self._length = len(next(iter(columns.values())))
+
+    @classmethod
+    def from_split(cls, split):
+        """The split in memory, or None when a column is ragged and cannot be stacked."""
+        if len(split) == 0:
+            return None
+        columns = split.with_format("torch")[:]
+        if not columns or not all(isinstance(v, torch.Tensor) for v in columns.values()):
+            return None
+        return cls(dict(columns))
+
+    def __len__(self):
+        return self._length
+
+    def __getitem__(self, index):
+        return {name: column[index] for name, column in self.columns.items()}
+
+
+def _in_memory(split):
+    """Serve ``split`` from memory when it stacks into tensors, else read it as before."""
+    return _InMemoryShard.from_split(split) or split
+
+
 def build_dataloaders(
     dataset_dict: Dict,
     num_clients: int,
@@ -303,7 +339,7 @@ def build_dataloaders(
 
     c2loader = {
         cid: DataLoader(
-            dataset_dict["c2data"][cid],
+            _in_memory(dataset_dict["c2data"][cid]),
             batch_size=client_batch_size,
             shuffle=True,
             num_workers=0,
@@ -314,7 +350,7 @@ def build_dataloaders(
     test_split = dataset_dict["test_data"]
     n_test = min(max_test_size, len(test_split))
     test_loader = DataLoader(
-        test_split.select(range(n_test)),
+        _in_memory(test_split.select(range(n_test))),
         batch_size=server_batch_size,
         shuffle=False,
         num_workers=0,

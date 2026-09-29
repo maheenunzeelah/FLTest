@@ -10,8 +10,9 @@ attacks:
 
 Multiple attacks compose. `target_clients` restricts which clients are adversarial.
 
-`backdoor` and `dlg` operate on pixels, so they apply only to image datasets and raise a
-clear error on a text run. `label_flip`, `sign_flip`, `gaussian`, `model_replacement`, and
+`backdoor`, `little_is_enough_backdoor`, `little_is_enough_cropped_backdoor`, and `dlg`
+operate on pixels, so they apply only
+to image datasets and raise a clear error on a text run. `label_flip`, `sign_flip`, `gaussian`, `model_replacement`, and
 `little_is_enough` work on labels or updates, so they apply to either modality.
 
 ## Catalog
@@ -23,6 +24,8 @@ clear error on a text run. `label_flip`, `sign_flip`, `gaussian`, `model_replace
 | `sign_flip` | model poisoning | `after_client_train` | `scale` (1.0) |
 | `model_replacement` | model poisoning (targeted) | `after_client_train` | `scale` (automatic), `target_round` |
 | `little_is_enough` | model poisoning (Byzantine, evasive) | `before_aggregate` | `z` (automatic), `target_clients` (required) |
+| `little_is_enough_cropped_backdoor` | model poisoning (targeted, evasive) | `on_data_distribute`, `before_aggregate`, `after_round` | `z` (automatic), `target_label` (0), `patch_size` (5), `target_clients` (required) |
+| `little_is_enough_backdoor` | model poisoning (targeted, evasive) | `on_data_distribute`, `before_aggregate`, `after_round` | `z` (automatic), `alpha` (1.0), `epochs` (5), `samples` (1000), `target_label` (0), `patch_size` (5), `target_clients` (required) |
 | `backdoor` | data poisoning (targeted) | `before_client_train`, `after_round` | `target_label` (0), `infection_rate` (0.3), `patch_size` (4), `patch_value` (1.0) |
 | `dlg` | privacy (gradient inversion) | `before_client_train` (+ `before_aggregate` in shared_update mode) | `target_client`, `target_round`, `num_images`, `iters`, `source` |
 | `membership_inference` | privacy (inference) | `on_data_distribute`, `after_round` | `target_client` (0), `max_samples` (512) |
@@ -97,7 +100,7 @@ its own FedAvg line is doing worse than no defense at all.
 
 Measured over one aggregation round on a controlled population of ten clients, four of them
 adversarial, so the numbers isolate what each rule concedes rather than how training then
-unfolds (`little_is_enough_defenses.yaml` runs the trained version):
+unfolds (the `rules-*` runs in `little_is_enough.yaml` are the trained version):
 
 | Aggregation | `z = 1.0` | `z = 1.5` | `z = 3.0` |
 |-------------|----------:|----------:|----------:|
@@ -112,7 +115,7 @@ moment `z` puts the craft outside the honest spread. The coordinate-wise rules n
 accept or reject: they concede a share that *falls* as `z` grows, because pushing an already
 extreme value further does not move a median.
 
-`little_is_enough_defenses.yaml` runs the trained version at `z = 1.5`, four rounds, over the
+The `rules-*` runs in `little_is_enough.yaml` train at `z = 1.5` for four rounds. Over the
 same five seeds:
 
 | Run | Accuracy | Absorption |
@@ -172,6 +175,39 @@ below roughly `n/2` attackers and reaches the paper's headline 1.43 only at 24 a
 of 50. Treat it as the stealth ceiling, not as a recommended strength, and sweep `z`
 (`attack_strength` in [metamorphic testing](metamorphic-testing.md)) to find where a defense
 actually breaks.
+
+**`little_is_enough_backdoor`** — the same paper's backdoor variant (Section 3.4,
+Algorithm 4), and the version of "A Little Is Enough" the FLDetector paper evaluates. It
+spends the `z`-deviation budget on a goal instead of a fixed shift: starting from the
+benign mean `mu`, the attacker trains on `samples` of its own images with the upper-left
+`patch_size` x `patch_size` pixels set to maximal intensity and relabelled `target_label`,
+for `epochs` passes, then clamps every parameter into `mu ± z·sigma` and submits the result
+from every attacker. The defaults are the paper's pattern experiment: 1000 images, a 5x5
+trigger, label 0, five passes. It records `attack_success_rate` every round, the share of
+triggered test images (true label other than the target) sent to `target_label`.
+
+`alpha` weights the paper's Equation 3, `alpha·l_backdoor + (1 - alpha)·l_delta`. Equation
+4's `l_delta` measures each parameter's distance from `mu` in units of `z·sigma`, and
+honest clients agree so closely that this term's curvature, `1/(z·sigma)^2`, makes plain SGD
+diverge; it is minimised exactly with a proximal step instead. Summed over every parameter
+it also outweighs the backdoor loss so heavily that the optimum stays at `mu`: on MNIST with
+the MLP, `alpha = 0.2` leaves the crafted update identical to the benign mean. The default
+`alpha = 1` lets the clamp alone keep the update inside the honest range, which is the
+clamp's job, and the backdoor then builds up round after round. Median over 30 rounds at 28%
+attackers reaches ASR 0.49 at `z = 0.74` while clean accuracy stays at 0.91; at the paper's
+`z = 0.2` it reaches only 0.03 in that time.
+
+**`little_is_enough_cropped_backdoor`** — the same attack as the FLDetector paper describes
+running it: each malicious update "computed following the Scaling Attack", which the
+attacker then "crops" into range. Every round, each attacker trains its own model from the
+global model on its own images plus a trigger-stamped duplicate of each, labelled
+`target_label` (the Scaling attack's augmentation, scaling factor 1), with the run's
+`client_epochs`, `client_lr`, and `client_batch_size`. It then clamps every parameter into
+the honest `mu ± z·sigma`. `little_is_enough_backdoor` trains one update from the honest
+mean and gives it to every attacker; this one gives each attacker its own, anchored to its
+own poisoned training. That is the difference a consistency detector such as `fldetector`
+reads. Trigger, target label, and `attack_success_rate` are as for
+`little_is_enough_backdoor`.
 
 **`backdoor`** — the attacker stamps a bright patch on a fraction (`infection_rate`) of its
 images and relabels them to `target_label`; the global model learns
@@ -237,8 +273,7 @@ attacks: [{name: little_is_enough, params: {z: 1.5}, target_clients: [0, 1, 2, 3
 ```
 
 Runnable: `examples/configs/attack_label_flip.yaml`, `model_replacement.yaml`,
-`little_is_enough.yaml` (strength sweep against Krum),
-`little_is_enough_defenses.yaml` (the same attack against each aggregation rule),
-`dlg.yaml`.
+`little_is_enough.yaml` (strength sweep against Krum, the same attack against each
+aggregation rule, and against FLDetector), `dlg.yaml`.
 
 To add your own attack, see **[Port your attacks & defenses](extending.md)**.

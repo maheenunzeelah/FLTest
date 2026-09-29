@@ -316,6 +316,147 @@ def test_little_is_enough_requires_named_attackers():
         LittleIsEnoughAttack()
 
 
+# --- little is enough, backdoor variant ------------------------------------------------
+
+def _lie_backdoor(z, alpha=1.0, sigma=0.01, attackers=(3, 4), num_clients=5, cropped=False,
+                  **kw):
+    """Honest MLP updates spread by ``sigma``, and an attack that has seen its own data."""
+    from fltest.attacks.little_is_enough_backdoor import (
+        LittleIsEnoughBackdoorAttack,
+        LittleIsEnoughCroppedBackdoorAttack,
+    )
+    from fltest.data.models import get_model
+    from fltest.data.utils import state_dict_to_ndarrays
+
+    torch.manual_seed(0)
+    base = state_dict_to_ndarrays(get_model("MLP", "", channels=1, deterministic=False).state_dict())
+    rng = np.random.default_rng(0)
+    uw = [([(w + rng.normal(0, sigma, w.shape)).astype(np.float32) for w in base], 10)
+          for _ in range(num_clients)]
+    loaders = {cid: [{"img": torch.randn(32, 1, 32, 32), "label": torch.randint(0, 10, (32,))}]
+               for cid in range(num_clients)}
+    spec = _spec(model_name="MLP", channels=1, client_lr=0.05, client_batch_size=32,
+                 optimizer="SGD", seed=1)
+    if cropped:
+        attack = LittleIsEnoughCroppedBackdoorAttack(target_clients=list(attackers), z=z, **kw)
+    else:
+        attack = LittleIsEnoughBackdoorAttack(
+            target_clients=list(attackers), z=z, alpha=alpha, samples=64, **kw)
+    attack.on_data_distribute(HookContext(cfg=spec, dist_dict=loaders))
+    ctx = HookContext(cfg=spec, round=1, updates_and_weights=[(list(u), n) for u, n in uw],
+                      global_state=base)
+    attack.before_aggregate(ctx)
+    return ctx, uw, spec
+
+
+def test_little_is_enough_backdoor_stays_inside_the_honest_spread():
+    ctx, uw, _ = _lie_backdoor(z=0.5)
+    honest = [uw[pos][0] for pos in (0, 1, 2)]
+    crafted = ctx.updates_and_weights[3][0]
+    moved = False
+    for layer, value in enumerate(crafted):
+        stacked = np.stack([h[layer].astype(np.float64) for h in honest])
+        mean, bound = stacked.mean(axis=0), 0.5 * stacked.std(axis=0)
+        assert np.all(value >= mean - bound - 1e-6) and np.all(value <= mean + bound + 1e-6)
+        moved |= not np.allclose(value, mean, atol=1e-6)
+        assert np.array_equal(value, ctx.updates_and_weights[4][0][layer])  # every attacker alike
+    assert moved  # the clamp bounds the craft, it does not erase it
+    for pos in (0, 1, 2):
+        assert all(np.array_equal(a, b) for a, b in zip(ctx.updates_and_weights[pos][0], uw[pos][0]))
+
+
+def test_little_is_enough_backdoor_crafts_a_working_trigger():
+    """With the clamp opened wide, what was trained is what is sent: a model with the trigger."""
+    from fltest.attacks.little_is_enough_backdoor import _stamp
+    from fltest.data.models import get_model
+    from fltest.data.utils import load_ndarrays_into
+
+    ctx, _, _ = _lie_backdoor(z=1e6, target_label=3)
+    model = get_model("MLP", "", channels=1, deterministic=False)
+    load_ndarrays_into(model, ctx.updates_and_weights[3][0])
+    with torch.no_grad():
+        predictions = model(_stamp(torch.randn(64, 1, 32, 32), 5, 1.0)).argmax(dim=1)
+    assert (predictions == 3).float().mean() > 0.9
+
+
+def test_cropped_backdoor_gives_each_attacker_its_own_update_inside_the_spread():
+    """The FLDetector paper's variant: per-attacker poisoned training, then a crop."""
+    ctx, uw, _ = _lie_backdoor(z=0.5, cropped=True)
+    honest = [uw[pos][0] for pos in (0, 1, 2)]
+    first, second = ctx.updates_and_weights[3][0], ctx.updates_and_weights[4][0]
+    assert not all(np.array_equal(a, b) for a, b in zip(first, second))
+    for crafted in (first, second):
+        for layer, value in enumerate(crafted):
+            stacked = np.stack([h[layer].astype(np.float64) for h in honest])
+            mean, bound = stacked.mean(axis=0), 0.5 * stacked.std(axis=0)
+            assert np.all(value >= mean - bound - 1e-6) and np.all(value <= mean + bound + 1e-6)
+    for pos in (0, 1, 2):
+        assert all(np.array_equal(a, b) for a, b in zip(ctx.updates_and_weights[pos][0], uw[pos][0]))
+
+
+def test_cropped_backdoor_trains_the_trigger_into_each_attackers_model():
+    from fltest.attacks.little_is_enough_backdoor import _stamp
+    from fltest.data.models import get_model
+    from fltest.data.utils import load_ndarrays_into
+
+    ctx, _, spec = _lie_backdoor(z=1e6, cropped=True, target_label=3)
+    for pos in (3, 4):
+        model = get_model("MLP", "", channels=1, deterministic=False)
+        load_ndarrays_into(model, ctx.updates_and_weights[pos][0])
+        with torch.no_grad():
+            predictions = model(_stamp(torch.randn(64, 1, 32, 32), 5, 1.0)).argmax(dim=1)
+        assert (predictions == 3).float().mean() > 0.9
+
+
+def test_little_is_enough_backdoor_penalty_stays_finite_when_honest_clients_agree():
+    """Equation 4 divides by z * sigma; a near-zero spread must not blow up the training."""
+    ctx, _, _ = _lie_backdoor(z=0.2, alpha=0.2, sigma=1e-7)
+    assert all(np.isfinite(layer).all() for layer in ctx.updates_and_weights[3][0])
+
+
+def test_little_is_enough_backdoor_leaves_the_global_rng_alone():
+    """Honest clients must shuffle as they would without the attacker in the run."""
+    from fltest.attacks.little_is_enough_backdoor import LittleIsEnoughBackdoorAttack
+
+    rng = np.random.default_rng(0)
+    shapes = [(128, 1024), (128,), (10, 128), (10,)]  # the MLP's layers, built without torch
+    uw = [([rng.normal(0, 0.1, s).astype(np.float32) for s in shapes], 10) for _ in range(4)]
+    loaders = {3: [{"img": torch.zeros(8, 1, 32, 32), "label": torch.zeros(8, dtype=torch.long)}]}
+    spec = _spec(model_name="MLP", channels=1, client_lr=0.05, client_batch_size=4,
+                 optimizer="SGD", seed=1)
+
+    torch.manual_seed(5)
+    expected = torch.rand(3)
+    torch.manual_seed(5)
+    attack = LittleIsEnoughBackdoorAttack(target_clients=[3], z=0.5, samples=8, epochs=1)
+    attack.on_data_distribute(HookContext(cfg=spec, dist_dict=loaders))
+    attack.before_aggregate(HookContext(cfg=spec, round=1, updates_and_weights=uw))
+    assert torch.equal(torch.rand(3), expected)
+
+
+def test_little_is_enough_backdoor_scores_attack_success_rate():
+    from fltest.attacks.little_is_enough_backdoor import LittleIsEnoughBackdoorAttack
+
+    class AlwaysTarget(torch.nn.Module):
+        def forward(self, x):
+            return torch.nn.functional.one_hot(torch.full((len(x),), 2), 10).float()
+
+    test_data = [{"img": torch.zeros(4, 1, 32, 32), "label": torch.tensor([2, 0, 1, 3])}]
+    ctx = HookContext(cfg=_spec(), round=1, global_state=[np.zeros(1)], model=AlwaysTarget(),
+                      test_data=test_data)
+    LittleIsEnoughBackdoorAttack(target_clients=[0], target_label=2).after_round(ctx)
+    assert ctx.metrics["attack_success_rate"] == 1.0  # the sample already labelled 2 is excluded
+
+
+def test_little_is_enough_backdoor_needs_images():
+    from fltest.attacks.little_is_enough_backdoor import LittleIsEnoughBackdoorAttack
+
+    text = {0: [{"input_ids": torch.zeros(2, 4, dtype=torch.long), "label": torch.zeros(2)}]}
+    with pytest.raises(ValueError, match="image dataset"):
+        LittleIsEnoughBackdoorAttack(target_clients=[0]).on_data_distribute(
+            HookContext(cfg=_spec(), dist_dict=text))
+
+
 def test_gradient_noise_clips_delta_norm():
     from fltest.defenses.gradient_noise import GradientNoiseDefense
 
